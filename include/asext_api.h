@@ -3,6 +3,18 @@
 #include <angelscript.h>
 #include "std_string.h"
 
+#ifndef ASEXT_PLUGIN_PATH
+#    if defined(_WIN64)
+#        define ASEXT_PLUGIN_PATH "addons/metamod/dlls/win64/asext.dll"
+#    elif defined(_WIN32)
+#        define ASEXT_PLUGIN_PATH "addons/metamod/dlls/win32/asext.dll"
+#    elif defined(__x86_64__) || defined(__amd64__)
+#        define ASEXT_PLUGIN_PATH "addons/metamod/dlls/linux64/asext.so"
+#    else
+#        define ASEXT_PLUGIN_PATH "addons/metamod/dlls/linux/asext.so"
+#    endif
+#endif
+
 const int StopMode_ON_HANDLED     = 0;
 const int StopMode_MODULE_HANDLED = 1;
 const int StopMode_CALL_ALL       = 2;
