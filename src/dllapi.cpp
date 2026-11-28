@@ -36,24 +36,13 @@
 
 #include <cl_entity.h>
 #include <entity_state.h>
-#include "gamesymbols.h"
+#include "bridge/asext_bridge.h"
 
-extern hook_t* g_phook_CASDocumentation_RegisterObjectType;
-extern hook_t* g_phook_CASDirectoryList_CreateDirectory;
-extern bool    g_ASDocInit;
-extern bool    g_ASDirInit;
+extern asext_bridge::BridgeSession g_ASExtBridgeSession;
 
 void NewServerActivate(edict_t* pEdictList, int edictCount, int clientMax)
 {
-    if (g_ASDocInit)
-    {
-        UNINSTALL_HOOK(CASDocumentation_RegisterObjectType);
-    }
-
-    if (g_ASDirInit)
-    {
-        UNINSTALL_HOOK(CASDirectoryList_CreateDirectory);
-    }
+    asext_bridge::OnServerActivatePost(g_ASExtBridgeSession);
 
     SET_META_RESULT(MRES_IGNORED);
 }

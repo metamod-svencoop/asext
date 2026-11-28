@@ -172,13 +172,17 @@ class CScriptDictionary
 public:
 };
 
+class CScriptDictionary_CIterator;
+
 class CASFunction
 {
 public:
 #ifdef _WIN32
+    virtual void Release(char a1) = 0;
+#else
     virtual void Unknown() = 0;
+    virtual void Release() = 0;
 #endif
-    virtual void Release(void* pthis) = 0;
 
     void* getReference()
     {

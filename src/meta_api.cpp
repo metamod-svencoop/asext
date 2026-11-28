@@ -47,12 +47,12 @@
 #include "sdk_util.h" // UTIL_LogPrintf, etc
 
 #include "asext.h"
+#include "bridge/asext_bridge.h"
 
-#include "serverdef.h"
+void ASEXT_AttachHost(const asext_bridge::BridgeSession& session) noexcept;
+void ASEXT_DetachHost() noexcept;
 
-hook_t* g_phook_CASDocumentation_RegisterObjectType = NULL;
-hook_t* g_phook_CASDirectoryList_CreateDirectory    = NULL;
-hook_t* g_phook_CScriptBuilder_DefineWord           = NULL;
+asext_bridge::BridgeSession g_ASExtBridgeSession;
 
 // Must provide at least one of these..
 static META_FUNCTIONS gMetaFunctionTable = {
@@ -145,100 +145,15 @@ C_DLLEXPORT int Meta_Attach(PLUG_LOADTIME /* now */,
         return FALSE;
     }
 
-    FILL_FROM_GAMEDATA(server, CASHook_CASHook);
-    FILL_FROM_GAMEDATA(server, CASHook_Call);
-    FILL_FROM_GAMEDATA(server, CString_Assign);
-    FILL_FROM_GAMEDATA(server, CString_dtor);
-    FILL_FROM_GAMEDATA(server, asGetActiveContext);
+    g_ASExtBridgeSession = asext_bridge::AcquireAngelScriptExt(serverHandle, serverBase);
+    if (g_ASExtBridgeSession.kind == asext_bridge::BackendKind::kUnavailable || !g_ASExtBridgeSession.host)
+    {
+        LOG_ERROR(PLID, "AngelScript extension backend unavailable; refusing to load asext.");
+        return FALSE;
+    }
 
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterObjectType);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterObjectProperty);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterGlobalProperty);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterGlobalFunction);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterObjectMethod);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterObjectBehaviour);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterFuncDef);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterEnum);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_RegisterEnumValue);
-    FILL_FROM_GAMEDATA(server, CASDocumentation_SetDefaultNamespace);
-    FILL_FROM_GAMEDATA(server, CASBaseManager_GetTypeInfoByName);
-    FILL_FROM_GAMEDATA(server, CASDirectoryList_CreateDirectory);
-    FILL_FROM_GAMEDATA(server, CASFunction_Create);
-    FILL_FROM_GAMEDATA(server, CASBaseCallable_Call);
-    FILL_FROM_GAMEDATA(server, CASRefCountedBaseClass_InternalRelease);
-    FILL_FROM_GAMEDATA(server, CScriptAny_Release);
-    FILL_FROM_GAMEDATA(server, CScriptArray_Release);
-
-    FILL_FROM_GAMEDATA(server, CScriptBuilder_DefineWord);
-
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_Create);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_AddRef);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_Release);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_Set);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_Get);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_Exists);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_IsEmpty);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_GetSize);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_Delete);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_DeleteAll);
-
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_begin);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_end);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_CIterator_operator_NE);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_CIterator_GetValue);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_CIterator_GetKey);
-    FILL_FROM_GAMEDATA(server, CScriptDictionary_CIterator_operator_PP);
-
-    VAR_FROM_GAMEDATA(server, g_pServerManager);
-
-    ASEXT_CallHook = (fnASEXT_CallHook)g_call_original_CASHook_Call;
-
-    ASEXT_CallCASBaseCallable = (fnASEXT_CallCASBaseCallable)g_call_original_CASBaseCallable_Call;
-
-    LOG_MESSAGE(PLID, "CASHook_CASHook found at %p", g_pfn_CASHook_CASHook);
-    LOG_MESSAGE(PLID, "CASHook_Call found at %p", g_pfn_CASHook_Call);
-    LOG_MESSAGE(PLID, "CString_Assign found at %p", g_pfn_CString_Assign);
-    LOG_MESSAGE(PLID, "CString_dtor found at %p", g_pfn_CString_dtor);
-    LOG_MESSAGE(PLID, "asGetActiveContext found at %p", g_pfn_asGetActiveContext);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterObjectType found at %p", g_pfn_CASDocumentation_RegisterObjectType);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterObjectProperty found at %p", g_pfn_CASDocumentation_RegisterObjectProperty);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterGlobalProperty found at %p", g_pfn_CASDocumentation_RegisterGlobalProperty);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterGlobalFunction found at %p", g_pfn_CASDocumentation_RegisterGlobalFunction);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterObjectMethod found at %p", g_pfn_CASDocumentation_RegisterObjectMethod);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterObjectBehaviour found at %p", g_pfn_CASDocumentation_RegisterObjectBehaviour);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterFuncDef found at %p", g_pfn_CASDocumentation_RegisterFuncDef);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterEnum found at %p", g_pfn_CASDocumentation_RegisterEnum);
-    LOG_MESSAGE(PLID, "CASDocumentation_RegisterEnumValue found at %p", g_pfn_CASDocumentation_RegisterEnumValue);
-    LOG_MESSAGE(PLID, "CASDocumentation_SetDefaultNamespace found at %p", g_pfn_CASDocumentation_SetDefaultNamespace);
-    LOG_MESSAGE(PLID, "CASBaseManager_GetTypeInfoByName found at %p", g_pfn_CASBaseManager_GetTypeInfoByName);
-    LOG_MESSAGE(PLID, "CASDirectoryList_CreateDirectory found at %p", g_pfn_CASDirectoryList_CreateDirectory);
-    LOG_MESSAGE(PLID, "CASFunction_Create found at %p", g_pfn_CASFunction_Create);
-    LOG_MESSAGE(PLID, "CASBaseCallable_Call found at %p", g_pfn_CASBaseCallable_Call);
-    LOG_MESSAGE(PLID, "CASRefCountedBaseClass_InternalRelease found at %p", g_pfn_CASRefCountedBaseClass_InternalRelease);
-    LOG_MESSAGE(PLID, "CScriptAny_Release found at %p", g_pfn_CScriptAny_Release);
-    LOG_MESSAGE(PLID, "CScriptArray_Release found at %p", g_pfn_CScriptArray_Release);
-    LOG_MESSAGE(PLID, "CScriptBuilder_DefineWord found at %p", g_pfn_CScriptBuilder_DefineWord);
-    LOG_MESSAGE(PLID, "CScriptDictionary_Create found at %p", g_pfn_CScriptDictionary_Create);
-    LOG_MESSAGE(PLID, "CScriptDictionary_AddRef found at %p", g_pfn_CScriptDictionary_AddRef);
-    LOG_MESSAGE(PLID, "CScriptDictionary_Release found at %p", g_pfn_CScriptDictionary_Release);
-    LOG_MESSAGE(PLID, "CScriptDictionary_Set found at %p", g_pfn_CScriptDictionary_Set);
-    LOG_MESSAGE(PLID, "CScriptDictionary_Get found at %p", g_pfn_CScriptDictionary_Get);
-    LOG_MESSAGE(PLID, "CScriptDictionary_Exists found at %p", g_pfn_CScriptDictionary_Exists);
-    LOG_MESSAGE(PLID, "CScriptDictionary_IsEmpty found at %p", g_pfn_CScriptDictionary_IsEmpty);
-    LOG_MESSAGE(PLID, "CScriptDictionary_GetSize found at %p", g_pfn_CScriptDictionary_GetSize);
-    LOG_MESSAGE(PLID, "CScriptDictionary_Delete found at %p", g_pfn_CScriptDictionary_Delete);
-    LOG_MESSAGE(PLID, "CScriptDictionary_DeleteAll found at %p", g_pfn_CScriptDictionary_DeleteAll);
-    LOG_MESSAGE(PLID, "CScriptDictionary_begin found at %p", g_pfn_CScriptDictionary_begin);
-    LOG_MESSAGE(PLID, "CScriptDictionary_end found at %p", g_pfn_CScriptDictionary_end);
-    LOG_MESSAGE(PLID, "CScriptDictionary_CIterator_GetKey found at %p", g_pfn_CScriptDictionary_CIterator_GetKey);
-    LOG_MESSAGE(PLID, "CScriptDictionary_CIterator_operator_NE found at %p", g_pfn_CScriptDictionary_CIterator_operator_NE);
-    LOG_MESSAGE(PLID, "CScriptDictionary_CIterator_GetValue found at %p", g_pfn_CScriptDictionary_CIterator_GetValue);
-    LOG_MESSAGE(PLID, "CScriptDictionary_CIterator_operator_PP found at %p", g_pfn_CScriptDictionary_CIterator_operator_PP);
-    LOG_MESSAGE(PLID, "g_pServerManager found at %p!", g_pServerManager);
-
-    INSTALL_INLINEHOOK(CASDocumentation_RegisterObjectType);
-    INSTALL_INLINEHOOK(CASDirectoryList_CreateDirectory);
-    INSTALL_INLINEHOOK(CScriptBuilder_DefineWord);
+    ASEXT_AttachHost(g_ASExtBridgeSession);
+    LOG_MESSAGE(PLID, "AngelScript extension backend active: %s", asext_bridge::BackendKindName(g_ASExtBridgeSession.kind));
 
     return TRUE;
 }
@@ -251,9 +166,8 @@ C_DLLEXPORT int Meta_Detach(PLUG_LOADTIME /* now */,
 {
     //Nope, AngelScript doesn't provide unloading procedures
 
-    UNINSTALL_HOOK(CASDocumentation_RegisterObjectType);
-    UNINSTALL_HOOK(CASDirectoryList_CreateDirectory);
-    UNINSTALL_HOOK(CScriptBuilder_DefineWord);
+    ASEXT_DetachHost();
+    asext_bridge::ReleaseAngelScriptExt(g_ASExtBridgeSession);
 
     return TRUE;
 }
