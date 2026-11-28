@@ -572,6 +572,37 @@ public:
             reinterpret_cast<CScriptDictionary_CIterator*>(iter) SC_SERVER_PASS_DUMMYARG2);
     }
 
+    // Map script lifecycle hook chains are only provided by native GoldSrcExt hosts.
+    HookHandle RegisterMapInitHook(goldsrcext::HookCallbackFn<bool>, void*, std::int32_t) noexcept override
+    {
+        return kInvalidHookHandle;
+    }
+
+    bool UnregisterMapInitHook(HookHandle) noexcept override
+    {
+        return false;
+    }
+
+    HookHandle RegisterMapActivateHook(goldsrcext::HookCallbackFn<bool>, void*, std::int32_t) noexcept override
+    {
+        return kInvalidHookHandle;
+    }
+
+    bool UnregisterMapActivateHook(HookHandle) noexcept override
+    {
+        return false;
+    }
+
+    HookHandle RegisterMapStartHook(goldsrcext::HookCallbackFn<bool>, void*, std::int32_t) noexcept override
+    {
+        return kInvalidHookHandle;
+    }
+
+    bool UnregisterMapStartHook(HookHandle) noexcept override
+    {
+        return false;
+    }
+
 private:
     std::vector<CallbackEntry<ASDocInitCallbackFn>>             m_docCallbacks;
     std::vector<CallbackEntry<ASDirInitCallbackFn>>             m_dirCallbacks;
