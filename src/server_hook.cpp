@@ -3,459 +3,466 @@
 #include <dllapi.h>
 #include <meta_api.h>
 
-#include <cl_entity.h>
-#include <entity_state.h>
-
-#include <vector>
 #include <algorithm>
-#include <stdint.h>
+#include <cstdarg>
+#include <cstdint>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 #include "asext.h"
+#include "bridge/asext_bridge.h"
 
-#include "serverdef.h"
+namespace
+{
 
-PRIVATE_FUNCTION_DEFINE(CASHook_Call);
-PRIVATE_FUNCTION_DEFINE(CASHook_CASHook);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterObjectType);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterObjectProperty);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterGlobalProperty);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterGlobalFunction);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterObjectMethod);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterObjectBehaviour);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterFuncDef);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterEnum);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_RegisterEnumValue);
-PRIVATE_FUNCTION_DEFINE(CASDocumentation_SetDefaultNamespace);
-PRIVATE_FUNCTION_DEFINE(CASBaseManager_GetTypeInfoByName);
-PRIVATE_FUNCTION_DEFINE(CASDirectoryList_CreateDirectory);
-PRIVATE_FUNCTION_DEFINE(CASFunction_Create);
-PRIVATE_FUNCTION_DEFINE(CASBaseCallable_Call);
-PRIVATE_FUNCTION_DEFINE(CASRefCountedBaseClass_InternalRelease);
-PRIVATE_FUNCTION_DEFINE(CScriptAny_Release);
-PRIVATE_FUNCTION_DEFINE(CScriptArray_Release);
-PRIVATE_FUNCTION_DEFINE(CString_Assign);
-PRIVATE_FUNCTION_DEFINE(CString_dtor);
-PRIVATE_FUNCTION_DEFINE(asGetActiveContext);
-PRIVATE_FUNCTION_DEFINE(CScriptBuilder_DefineWord);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_Create);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_AddRef);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_Release);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_Set);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_Get);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_Exists);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_IsEmpty);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_GetSize);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_Delete);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_DeleteAll);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_begin);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_end);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_CIterator_GetKey);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_CIterator_operator_NE);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_CIterator_GetValue);
-PRIVATE_FUNCTION_DEFINE(CScriptDictionary_CIterator_operator_PP);
+using goldsrcext::HookHandle;
+using goldsrcext::kInvalidHookHandle;
+using goldsrcext::svencoop::ASDictIteratorStorage;
+using goldsrcext::svencoop::ASFuncPtrDesc;
+using goldsrcext::svencoop::ISvenCoopAngelScriptExt;
 
-CASServerManager** g_pServerManager = NULL;
+ISvenCoopAngelScriptExt* g_pHost = nullptr;
+
+std::vector<HookHandle>                                           g_docHandles;
+std::vector<HookHandle>                                           g_dirHandles;
+std::vector<std::pair<fnScriptBuilderDefineCallback, HookHandle>> g_builderHandles;
+
+void DocInitTrampoline(CASDocumentation* docs, void* userData) noexcept
+{
+    auto cb = reinterpret_cast<fnASDocInitCallback>(userData);
+    if (cb)
+        cb(docs);
+}
+
+void DirInitTrampoline(CASDirectoryList* dirList, void* userData) noexcept
+{
+    auto cb = reinterpret_cast<fnASDirInitCallback>(userData);
+    if (cb)
+        cb(dirList);
+}
+
+void ScriptBuilderDefineTrampoline(CScriptBuilder* builder, void* userData) noexcept
+{
+    auto cb = reinterpret_cast<fnScriptBuilderDefineCallback>(userData);
+    if (cb)
+        cb(builder);
+}
+
+void NativeCallHookTrampoline(void* hook, int argCount, ...)
+{
+    if (!g_pHost || !hook)
+        return;
+
+    std::va_list args;
+    va_start(args, argCount);
+    g_pHost->CallHookV(static_cast<CASHook*>(hook), argCount, args);
+    va_end(args);
+}
+
+int NativeCallCallableTrampoline(void* callable, int argCount, ...)
+{
+    if (!g_pHost || !callable)
+        return 0;
+
+    std::va_list args;
+    va_start(args, argCount);
+    const bool ok = g_pHost->CallCallableV(static_cast<CASFunction*>(callable), argCount, args);
+    va_end(args);
+    return ok ? 1 : 0;
+}
+
+ASFuncPtrDesc MakeFuncPtrDesc(const void* funcPtr) noexcept
+{
+    ASFuncPtrDesc desc{};
+    if (!funcPtr)
+        return desc;
+
+    const auto*       src     = static_cast<const asSFuncPtr*>(funcPtr);
+    const std::size_t copyLen = sizeof(src->ptr.dummy) < ASFuncPtrDesc::kMaxBytes ? sizeof(src->ptr.dummy) : ASFuncPtrDesc::kMaxBytes;
+    std::memcpy(desc.bytes, src->ptr.dummy, copyLen);
+    desc.size = static_cast<std::uint8_t>(copyLen);
+    desc.flag = src->flag;
+    return desc;
+}
+
+} // namespace
 
 fnASEXT_CallHook ASEXT_CallHook = NULL;
 
 fnASEXT_CallCASBaseCallable ASEXT_CallCASBaseCallable = NULL;
 
-bool                             g_ASDocInit = false;
-std::vector<fnASDocInitCallback> g_ASDocInitCallbacks;
+void ASEXT_AttachHost(const asext_bridge::BridgeSession& session) noexcept
+{
+    g_pHost = session.host;
+    g_docHandles.clear();
+    g_dirHandles.clear();
+    g_builderHandles.clear();
 
-bool                             g_ASDirInit = false;
-std::vector<fnASDirInitCallback> g_ASDirInitCallbacks;
+    if (session.kind == asext_bridge::BackendKind::kHostNative)
+    {
+        ASEXT_CallHook            = &NativeCallHookTrampoline;
+        ASEXT_CallCASBaseCallable = &NativeCallCallableTrampoline;
+    }
+    else if (session.kind == asext_bridge::BackendKind::kLegacyInlineHook)
+    {
+        ASEXT_CallHook            = session.rawCallHook;
+        ASEXT_CallCASBaseCallable = session.rawCallCallable;
+    }
+    else
+    {
+        ASEXT_CallHook            = NULL;
+        ASEXT_CallCASBaseCallable = NULL;
+    }
+}
 
-std::vector<fnScriptBuilderDefineCallback> g_ScriptBuilderDefineCallbacks;
+void ASEXT_DetachHost() noexcept
+{
+    if (g_pHost)
+    {
+        for (HookHandle h : g_docHandles)
+            g_pHost->UnregisterDocInitCallback(h);
+        for (HookHandle h : g_dirHandles)
+            g_pHost->UnregisterDirInitCallback(h);
+        for (const auto& entry : g_builderHandles)
+            g_pHost->UnregisterScriptBuilderDefineCallback(entry.second);
+    }
 
-std::vector<CASHook*> g_ASHooks;
+    g_docHandles.clear();
+    g_dirHandles.clear();
+    g_builderHandles.clear();
+    g_pHost                   = nullptr;
+    ASEXT_CallHook            = NULL;
+    ASEXT_CallCASBaseCallable = NULL;
+}
 
 C_DLLEXPORT void ASEXT_RegisterObjectMethod(CASDocumentation* pthis, const char* docs, const char* name, const char* func, void* pfn, int type)
 {
-    SC_SERVER_DUMMYVAR;
-
-    asSFuncPtr reg;
-    reg.CopyMethodPtr(&pfn, sizeof(pfn));
-
-    switch (type)
-    {
-        case asCALL_CDECL:
-        case asCALL_CDECL_OBJFIRST:
-        case asCALL_CDECL_OBJLAST:
-            reg.flag = 2; //2 = global function
-            break;
-        default:
-            reg.flag = 3; //3 = method
-            break;
-    }
-
-    g_call_original_CASDocumentation_RegisterObjectMethod(pthis, SC_SERVER_PASS_DUMMYARG docs, name, func, &reg, type);
+    if (g_pHost)
+        g_pHost->RegisterObjectMethod(pthis, docs, name, func, pfn, static_cast<std::uint32_t>(type));
 }
 
 C_DLLEXPORT void ASEXT_RegisterObjectMethodEx(CASDocumentation* pthis, const char* docs, const char* name, const char* func, void* funcptr, int type)
 {
-    SC_SERVER_DUMMYVAR;
-    g_call_original_CASDocumentation_RegisterObjectMethod(pthis, SC_SERVER_PASS_DUMMYARG docs, name, func, (asSFuncPtr*)funcptr, type);
+    if (!g_pHost || !funcptr)
+        return;
+    ASFuncPtrDesc desc = MakeFuncPtrDesc(funcptr);
+    g_pHost->RegisterObjectMethodEx(pthis, docs, name, func, &desc, static_cast<std::uint32_t>(type));
 }
 
 C_DLLEXPORT void ASEXT_RegisterObjectBehaviour(CASDocumentation* pthis, const char* docs, const char* name, int behaviour, const char* func, void* pfn, int type)
 {
-    SC_SERVER_DUMMYVAR;
-
-    asSFuncPtr reg;
-    reg.CopyMethodPtr(&pfn, sizeof(pfn));
-    reg.flag = 2; //2 = global func
-
-    g_call_original_CASDocumentation_RegisterObjectBehaviour(pthis, SC_SERVER_PASS_DUMMYARG docs, name, behaviour, func, &reg, type, 0);
+    if (g_pHost)
+        g_pHost->RegisterObjectBehaviour(pthis, docs, name, behaviour, func, pfn, static_cast<std::uint32_t>(type));
 }
 
 C_DLLEXPORT void ASEXT_RegisterObjectBehaviourEx(CASDocumentation* pthis, const char* docs, const char* name, int behaviour, const char* func, void* funcptr, int type)
 {
-    SC_SERVER_DUMMYVAR;
-    g_call_original_CASDocumentation_RegisterObjectBehaviour(pthis, SC_SERVER_PASS_DUMMYARG docs, name, behaviour, func, (asSFuncPtr*)funcptr, type, 0);
+    if (!g_pHost || !funcptr)
+        return;
+    ASFuncPtrDesc desc = MakeFuncPtrDesc(funcptr);
+    g_pHost->RegisterObjectBehaviourEx(pthis, docs, name, behaviour, func, &desc, static_cast<std::uint32_t>(type));
 }
 
 C_DLLEXPORT void ASEXT_RegisterObjectType(CASDocumentation* pthis, const char* docs, const char* name, int size, unsigned int flags)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_call_original_CASDocumentation_RegisterObjectType(pthis, SC_SERVER_PASS_DUMMYARG docs, name, size, flags);
+    if (g_pHost)
+        g_pHost->RegisterObjectType(pthis, docs, name, size, flags);
 }
 
 C_DLLEXPORT void ASEXT_RegisterObjectProperty(CASDocumentation* pthis, const char* docs, const char* name, const char* prop, int offset)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_call_original_CASDocumentation_RegisterObjectProperty(pthis, SC_SERVER_PASS_DUMMYARG docs, name, prop, offset);
+    if (g_pHost)
+        g_pHost->RegisterObjectProperty(pthis, docs, name, prop, offset);
 }
 
 C_DLLEXPORT void ASEXT_RegisterGlobalProperty(CASDocumentation* pthis, const char* docs, const char* name, void* ptr)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_call_original_CASDocumentation_RegisterGlobalProperty(pthis, SC_SERVER_PASS_DUMMYARG docs, name, ptr);
+    if (g_pHost)
+        g_pHost->RegisterGlobalProperty(pthis, docs, name, ptr);
 }
 
 C_DLLEXPORT void ASEXT_RegisterGlobalFunction(CASDocumentation* pthis, const char* docs, const char* func, void* pfn, int type)
 {
-    SC_SERVER_DUMMYVAR;
-
-    asSFuncPtr reg;
-    reg.CopyMethodPtr(&pfn, sizeof(pfn));
-    reg.flag = 2;
-
-    g_call_original_CASDocumentation_RegisterGlobalFunction(pthis, SC_SERVER_PASS_DUMMYARG docs, func, &reg, type, 0);
+    if (g_pHost)
+        g_pHost->RegisterGlobalFunction(pthis, docs, func, pfn, static_cast<std::uint32_t>(type));
 }
 
 C_DLLEXPORT void ASEXT_RegisterFuncDef(CASDocumentation* pthis, const char* docs, const char* funcdef)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_call_original_CASDocumentation_RegisterFuncDef(pthis, SC_SERVER_PASS_DUMMYARG docs, funcdef);
+    if (g_pHost)
+        g_pHost->RegisterFuncDef(pthis, docs, funcdef);
 }
 
 C_DLLEXPORT void ASEXT_RegisterEnum(CASDocumentation* pthis, const char* docs, const char* enums, int enumtype)
 {
-    SC_SERVER_DUMMYVAR;
-    g_call_original_CASDocumentation_RegisterEnum(pthis, SC_SERVER_PASS_DUMMYARG docs, enums, enumtype);
+    if (g_pHost)
+        g_pHost->RegisterEnum(pthis, docs, enums, enumtype);
 }
 
 C_DLLEXPORT void ASEXT_RegisterEnumValue(CASDocumentation* pthis, const char* docs, const char* enums, const char* name, int value)
 {
-    SC_SERVER_DUMMYVAR;
-    g_call_original_CASDocumentation_RegisterEnumValue(pthis, SC_SERVER_PASS_DUMMYARG docs, enums, name, value);
+    if (g_pHost)
+        g_pHost->RegisterEnumValue(pthis, docs, enums, name, value);
 }
 
 C_DLLEXPORT void ASEXT_SetDefaultNamespace(CASDocumentation* pthis, const char* ns)
 {
-    SC_SERVER_DUMMYVAR;
-    g_call_original_CASDocumentation_SetDefaultNamespace(pthis, SC_SERVER_PASS_DUMMYARG ns);
+    if (g_pHost)
+        g_pHost->SetDefaultNamespace(pthis, ns);
 }
 
-C_DLLEXPORT asITypeInfo* ASEXT_CASBaseManager_GetTypeInfoByName(CASServerManager* pthis, const std_string* name)
+C_DLLEXPORT asITypeInfo* ASEXT_CASBaseManager_GetTypeInfoByName(CASServerManager* /*pthis*/, const std_string* name)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_call_original_CASBaseManager_GetTypeInfoByName(pthis, SC_SERVER_PASS_DUMMYARG name);
-}
-
-int SC_SERVER_DECL NewCASDocumentation_RegisterObjectType(CASDocumentation* pthis, SC_SERVER_DUMMYARG const char* docs, const char* name, int size, unsigned int flags)
-{
-    /*
-		Called from CASServerRegistration::RegisterInterfaces -> RegisterSCScriptSurvivalMode -> RegisterSCScriptSurvivalMode, where most of SCScript registrations have been done before.
-	*/
-    if (name && docs && !strcmp(name, "CSurvivalMode") && !strcmp(docs, "Survival Mode handler") && flags == 0x40001u)
-    {
-        for (size_t i = 0; i < g_ASDocInitCallbacks.size(); ++i)
-        {
-            g_ASDocInitCallbacks[i](pthis);
-        }
-
-        g_ASDocInitCallbacks.clear();
-        g_ASDocInit = true;
-    }
-
-    return g_call_original_CASDocumentation_RegisterObjectType(pthis, SC_SERVER_PASS_DUMMYARG docs, name, size, flags);
-}
-
-void SC_SERVER_DECL NewCASDirectoryList_CreateDirectory(CASDirectoryList* pthis, SC_SERVER_DUMMYARG const char* path, unsigned char flags, unsigned char access_control, unsigned char permanent, unsigned char unk)
-{
-    /*
-		Called from CASServerManager::SetupFileSystem -> CASDirectoryList::CreateDirectory(a2, "scripts/plugins/store", 2u, 3u, 1u, 0);
-	*/
-    if (!strcmp(path, "scripts/plugins/store") && flags == ASFlag_Plugin && access_control == (ASFileAccessControl_Read | ASFileAccessControl_Write) && permanent == 1)
-    {
-        for (size_t i = 0; i < g_ASDirInitCallbacks.size(); ++i)
-        {
-            g_ASDirInitCallbacks[i](pthis);
-        }
-
-        g_ASDirInitCallbacks.clear();
-        g_ASDirInit = true;
-    }
-
-    g_call_original_CASDirectoryList_CreateDirectory(pthis, SC_SERVER_PASS_DUMMYARG path, flags, access_control, permanent, unk);
+    if (!g_pHost || !name)
+        return NULL;
+    return g_pHost->GetTypeInfoByName(const_cast<std_string*>(name)->c_str());
 }
 
 C_DLLEXPORT void ASEXT_CreateDirectory(CASDirectoryList* pthis, const char* path, unsigned char flags, unsigned char access_control, unsigned char permanent, unsigned char unk)
 {
-    SC_SERVER_DUMMYVAR;
-    g_call_original_CASDirectoryList_CreateDirectory(pthis, SC_SERVER_PASS_DUMMYARG path, flags, access_control, permanent, unk);
+    if (g_pHost)
+        g_pHost->CreateVirtualDirectory(pthis, path, flags, access_control, permanent, unk);
 }
 
 C_DLLEXPORT bool ASEXT_RegisterDocInitCallback(fnASDocInitCallback callback)
 {
-    if (g_ASDocInit)
+    if (!g_pHost || !callback)
         return false;
-
-    g_ASDocInitCallbacks.emplace_back(callback);
-
+    HookHandle h = g_pHost->RegisterDocInitCallback(&DocInitTrampoline, reinterpret_cast<void*>(callback));
+    if (h == kInvalidHookHandle)
+        return false;
+    g_docHandles.push_back(h);
     return true;
 }
 
 C_DLLEXPORT bool ASEXT_RegisterDirInitCallback(fnASDirInitCallback callback)
 {
-    if (g_ASDirInit)
+    if (!g_pHost || !callback)
         return false;
-
-    g_ASDirInitCallbacks.emplace_back(callback);
-
+    HookHandle h = g_pHost->RegisterDirInitCallback(&DirInitTrampoline, reinterpret_cast<void*>(callback));
+    if (h == kInvalidHookHandle)
+        return false;
+    g_dirHandles.push_back(h);
     return true;
 }
 
 C_DLLEXPORT bool ASEXT_RegisterScriptBuilderDefineCallback(fnScriptBuilderDefineCallback callback)
 {
-    g_ScriptBuilderDefineCallbacks.emplace_back(callback);
-
+    if (!g_pHost || !callback)
+        return false;
+    HookHandle h = g_pHost->RegisterScriptBuilderDefineCallback(&ScriptBuilderDefineTrampoline, reinterpret_cast<void*>(callback));
+    if (h == kInvalidHookHandle)
+        return false;
+    g_builderHandles.emplace_back(callback, h);
     return true;
 }
 
 C_DLLEXPORT bool ASEXT_UnregisterScriptBuilderDefineCallback(fnScriptBuilderDefineCallback callback)
 {
-    auto it    = std::remove_if(g_ScriptBuilderDefineCallbacks.begin(), g_ScriptBuilderDefineCallbacks.end(), [callback](fnScriptBuilderDefineCallback cb) {
-        return cb == callback;
+    if (!g_pHost || !callback)
+        return false;
+
+    bool removed = false;
+    auto it      = std::remove_if(g_builderHandles.begin(), g_builderHandles.end(), [&](const auto& entry) {
+        if (entry.first == callback)
+        {
+            g_pHost->UnregisterScriptBuilderDefineCallback(entry.second);
+            removed = true;
+            return true;
+        }
+        return false;
     });
-    bool found = it != g_ScriptBuilderDefineCallbacks.end();
-    g_ScriptBuilderDefineCallbacks.erase(it, g_ScriptBuilderDefineCallbacks.end());
-    return found;
+    g_builderHandles.erase(it, g_builderHandles.end());
+    return removed;
 }
 
 C_DLLEXPORT void* ASEXT_RegisterHook(const char* docs, int stopMode, int type, int flags, const char* domain, const char* func, const char* args)
 {
-    SC_SERVER_DUMMYVAR;
-
-    CASHookRegistration reg;
-    reg.unk      = 0;
-    reg.stopMode = stopMode;
-    reg.docs     = docs;
-
-    CASHook* hook = new CASHook;
-    g_ASHooks.emplace_back(hook);
-
-    g_pfn_CASHook_CASHook(hook, SC_SERVER_PASS_DUMMYARG type, flags, domain, func, args, &reg);
-
-    return hook;
+    if (!g_pHost)
+        return NULL;
+    return g_pHost->RegisterHook(
+        docs,
+        stopMode,
+        static_cast<std::uint8_t>(type),
+        static_cast<std::uint8_t>(flags),
+        domain,
+        func,
+        args);
 }
 
 C_DLLEXPORT void ASEXT_CStringAssign(CString* pthis, const char* src, size_t len)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_pfn_CString_Assign(pthis, SC_SERVER_PASS_DUMMYARG src, len);
+    if (g_pHost)
+        g_pHost->CStringAssign(pthis, src, len);
 }
 
 C_DLLEXPORT void ASEXT_CString_Assign(CString* pthis, const char* src, size_t len)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_pfn_CString_Assign(pthis, SC_SERVER_PASS_DUMMYARG src, len);
+    if (g_pHost)
+        g_pHost->CStringAssign(pthis, src, len);
 }
 
 C_DLLEXPORT void ASEXT_CStringdtor(CString* pthis)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_pfn_CString_dtor(pthis SC_SERVER_PASS_DUMMYARG2);
+    if (g_pHost)
+        g_pHost->CStringDestroy(pthis);
 }
 
 C_DLLEXPORT void ASEXT_CString_dtor(CString* pthis)
 {
-    SC_SERVER_DUMMYVAR;
-
-    g_pfn_CString_dtor(pthis SC_SERVER_PASS_DUMMYARG2);
+    if (g_pHost)
+        g_pHost->CStringDestroy(pthis);
 }
+
 C_DLLEXPORT CASFunction* ASEXT_CreateCASFunction(aslScriptFunction* aslfn, CASModule* asmodule, int unk)
 {
-    return g_pfn_CASFunction_Create(aslfn, asmodule, unk);
+    if (!g_pHost)
+        return NULL;
+    return g_pHost->CreateCASFunction(reinterpret_cast<asIScriptFunction*>(aslfn), asmodule, unk != 0);
+}
+
+C_DLLEXPORT void ASEXT_ReleaseCASFunction(CASFunction* callback)
+{
+    if (g_pHost)
+        g_pHost->ReleaseCASFunction(callback);
 }
 
 C_DLLEXPORT CASServerManager* ASEXT_GetServerManager()
 {
-    return (*g_pServerManager);
+    return g_pHost ? g_pHost->GetServerManager() : NULL;
+}
+
+C_DLLEXPORT asIScriptEngine* ASEXT_GetScriptEngine()
+{
+    return g_pHost ? g_pHost->GetScriptEngine() : NULL;
+}
+
+C_DLLEXPORT CASModule* ASEXT_GetCurrentModule()
+{
+    return g_pHost ? g_pHost->GetCurrentModule() : NULL;
 }
 
 C_DLLEXPORT bool ASEXT_CASRefCountedBaseClass_InternalRelease(void* ref)
 {
-    return g_pfn_CASRefCountedBaseClass_InternalRelease(ref);
+    return g_pHost ? g_pHost->RefCountedInternalRelease(ref) : false;
 }
 
 C_DLLEXPORT void ASEXT_CScriptAny_Release(void* anywhat)
 {
-    g_pfn_CScriptAny_Release(anywhat);
+    if (g_pHost)
+        g_pHost->ScriptAnyRelease(static_cast<CScriptAny*>(anywhat));
 }
 
 C_DLLEXPORT void ASEXT_CScriptArray_Release(void* anywhat)
 {
-    g_pfn_CScriptArray_Release(anywhat);
+    if (g_pHost)
+        g_pHost->ScriptArrayRelease(static_cast<CScriptArray*>(anywhat));
 }
 
 C_DLLEXPORT void* ASEXT_GetCurrentContext()
 {
-    return g_pfn_asGetActiveContext();
+    return g_pHost ? g_pHost->GetCurrentContext() : NULL;
 }
 
 C_DLLEXPORT void ASEXT_CScriptBuilder_DefineWord(CScriptBuilder* pthis, const char* word)
 {
-    SC_SERVER_DUMMYVAR;
-
-    if (g_call_original_CScriptBuilder_DefineWord)
-        g_call_original_CScriptBuilder_DefineWord(pthis, SC_SERVER_PASS_DUMMYARG word);
-    else
-        g_pfn_CScriptBuilder_DefineWord(pthis, SC_SERVER_PASS_DUMMYARG word);
-}
-
-void SC_SERVER_DECL NewCScriptBuilder_DefineWord(CScriptBuilder* pthis, SC_SERVER_DUMMYARG const char* word)
-{
-    ASEXT_CScriptBuilder_DefineWord(pthis, word);
-
-    if (!strcmp(word, "SERVER"))
-    {
-        for (size_t i = 0; i < g_ScriptBuilderDefineCallbacks.size(); ++i)
-        {
-            g_ScriptBuilderDefineCallbacks[i](pthis);
-        }
-    }
+    if (g_pHost)
+        g_pHost->ScriptBuilderDefineWord(pthis, word);
 }
 
 C_DLLEXPORT CScriptDictionary* ASEXT_CScriptDictionary_Create(void* pScriptEngine)
 {
-    return g_pfn_CScriptDictionary_Create(pScriptEngine);
+    return g_pHost ? g_pHost->DictCreate(static_cast<asIScriptEngine*>(pScriptEngine)) : NULL;
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_AddRef(CScriptDictionary* pScriptDictionary)
 {
-    SC_SERVER_DUMMYVAR;
-    g_pfn_CScriptDictionary_AddRef(pScriptDictionary SC_SERVER_PASS_DUMMYARG2);
+    if (g_pHost)
+        g_pHost->DictAddRef(pScriptDictionary);
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_Release(CScriptDictionary* pScriptDictionary)
 {
-    SC_SERVER_DUMMYVAR;
-    g_pfn_CScriptDictionary_Release(pScriptDictionary SC_SERVER_PASS_DUMMYARG2);
+    if (g_pHost)
+        g_pHost->DictRelease(pScriptDictionary);
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_Set(CScriptDictionary* pScriptDictionary, const CString* key, const void* val, int asTypeId)
 {
-    SC_SERVER_DUMMYVAR;
-    g_pfn_CScriptDictionary_Set(pScriptDictionary, SC_SERVER_PASS_DUMMYARG key, val, asTypeId);
+    if (g_pHost)
+        g_pHost->DictSet(pScriptDictionary, key, val, asTypeId);
 }
 
 C_DLLEXPORT bool ASEXT_CScriptDictionary_Get(CScriptDictionary* pScriptDictionary, const CString* key, void* val, int asTypeId)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_pfn_CScriptDictionary_Get(pScriptDictionary, SC_SERVER_PASS_DUMMYARG key, val, asTypeId);
+    return g_pHost ? g_pHost->DictGet(pScriptDictionary, key, val, asTypeId) : false;
 }
 
 C_DLLEXPORT bool ASEXT_CScriptDictionary_Exists(CScriptDictionary* pScriptDictionary, const CString* key)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_pfn_CScriptDictionary_Exists(pScriptDictionary, SC_SERVER_PASS_DUMMYARG key);
+    return g_pHost ? g_pHost->DictExists(pScriptDictionary, key) : false;
 }
 
 C_DLLEXPORT bool ASEXT_CScriptDictionary_IsEmpty(CScriptDictionary* pScriptDictionary)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_pfn_CScriptDictionary_IsEmpty(pScriptDictionary SC_SERVER_PASS_DUMMYARG2);
+    return g_pHost ? g_pHost->DictIsEmpty(pScriptDictionary) : true;
 }
 
 C_DLLEXPORT unsigned int ASEXT_CScriptDictionary_GetSize(CScriptDictionary* pScriptDictionary)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_pfn_CScriptDictionary_GetSize(pScriptDictionary SC_SERVER_PASS_DUMMYARG2);
+    return g_pHost ? g_pHost->DictGetSize(pScriptDictionary) : 0u;
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_Delete(CScriptDictionary* pScriptDictionary, const CString* key)
 {
-    SC_SERVER_DUMMYVAR;
-    g_pfn_CScriptDictionary_Delete(pScriptDictionary, SC_SERVER_PASS_DUMMYARG key);
+    if (g_pHost)
+        g_pHost->DictDelete(pScriptDictionary, key);
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_DeleteAll(CScriptDictionary* pScriptDictionary)
 {
-    SC_SERVER_DUMMYVAR;
-    g_pfn_CScriptDictionary_DeleteAll(pScriptDictionary SC_SERVER_PASS_DUMMYARG2);
+    if (g_pHost)
+        g_pHost->DictDeleteAll(pScriptDictionary);
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_begin(CScriptDictionary* pScriptDictionary, CScriptDictionary_CIterator* it)
 {
-    SC_SERVER_DUMMYVAR;
-#ifdef _WIN32
-    g_pfn_CScriptDictionary_begin(pScriptDictionary, SC_SERVER_PASS_DUMMYARG it);
-#else
-    g_pfn_CScriptDictionary_begin(it, pScriptDictionary);
-#endif
+    if (g_pHost)
+        g_pHost->DictBegin(pScriptDictionary, reinterpret_cast<ASDictIteratorStorage*>(it));
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_end(CScriptDictionary* pScriptDictionary, CScriptDictionary_CIterator* it)
 {
-    SC_SERVER_DUMMYVAR;
-#ifdef _WIN32
-    g_pfn_CScriptDictionary_end(pScriptDictionary, SC_SERVER_PASS_DUMMYARG it);
-#else
-    g_pfn_CScriptDictionary_end(it, pScriptDictionary);
-#endif
+    if (g_pHost)
+        g_pHost->DictEnd(pScriptDictionary, reinterpret_cast<ASDictIteratorStorage*>(it));
 }
 
 C_DLLEXPORT bool ASEXT_CScriptDictionary_CIterator_operator_NE(CScriptDictionary_CIterator* a1, CScriptDictionary_CIterator* a2)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_pfn_CScriptDictionary_CIterator_operator_NE(a1, SC_SERVER_PASS_DUMMYARG a2);
+    if (!g_pHost)
+        return false;
+    return g_pHost->DictIterNotEqual(
+        reinterpret_cast<const ASDictIteratorStorage*>(a1),
+        reinterpret_cast<const ASDictIteratorStorage*>(a2));
 }
 
 C_DLLEXPORT bool ASEXT_CScriptDictionary_CIterator_GetValue(CScriptDictionary_CIterator* it, void* data, int typeId)
 {
-    SC_SERVER_DUMMYVAR;
-    return g_pfn_CScriptDictionary_CIterator_GetValue(it, SC_SERVER_PASS_DUMMYARG data, typeId);
+    if (!g_pHost)
+        return false;
+    return g_pHost->DictIterGetValue(reinterpret_cast<const ASDictIteratorStorage*>(it), data, typeId);
 }
 
 C_DLLEXPORT const CString* ASEXT_CScriptDictionary_CIterator_GetKey(CScriptDictionary_CIterator* it)
 {
-    SC_SERVER_DUMMYVAR;
-
-    return g_pfn_CScriptDictionary_CIterator_GetKey(it SC_SERVER_PASS_DUMMYARG2);
+    if (!g_pHost)
+        return NULL;
+    return g_pHost->DictIterGetKey(reinterpret_cast<const ASDictIteratorStorage*>(it));
 }
 
 C_DLLEXPORT void ASEXT_CScriptDictionary_CIterator_operator_PP(CScriptDictionary_CIterator* it)
 {
-    SC_SERVER_DUMMYVAR;
-    g_pfn_CScriptDictionary_CIterator_operator_PP(it SC_SERVER_PASS_DUMMYARG2);
+    if (g_pHost)
+        g_pHost->DictIterIncrement(reinterpret_cast<ASDictIteratorStorage*>(it));
 }

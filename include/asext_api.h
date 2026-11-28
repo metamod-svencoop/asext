@@ -103,11 +103,18 @@ public:
     asContext*         ascontext;
 };
 
-#define ASEXT_DereferenceCASFunction(callback)                                  \
-    if (ASEXT_CASRefCountedBaseClass_InternalRelease(callback->getReference())) \
-    {                                                                           \
-        callback->Release(CASFunction_dtor_firstarg);                           \
-    }
+#define ASEXT_DereferenceCASFunction(callback)                                             \
+    do                                                                                     \
+    {                                                                                      \
+        if (ASEXT_ReleaseCASFunction)                                                      \
+        {                                                                                  \
+            ASEXT_ReleaseCASFunction(callback);                                            \
+        }                                                                                  \
+        else if (ASEXT_CASRefCountedBaseClass_InternalRelease((callback)->getReference())) \
+        {                                                                                  \
+            (callback)->Release(CASFunction_dtor_firstarg);                                \
+        }                                                                                  \
+    } while (0)
 
 class asIScriptEngine;
 
@@ -124,13 +131,15 @@ public:
     }
 
 public:
-    int              unk1;         //0
-    int              unk2;         //4
-    int              unk3;         //8
-    asIScriptEngine* scriptEngine; //12
-    int              unk5;         //16
-    int              unk6;         //20
-    CASModule*       curModule;    //24
+    void*            vptr;         // 0  (32-bit: 0, 64-bit: 0)
+    bool             unk_b1;       // 4  (32-bit: 4, 64-bit: 8)
+    bool             unk_b2;       // 5  (32-bit: 5, 64-bit: 9)
+    bool             unk_b3;       // 6  (32-bit: 6, 64-bit: 10)
+    void*            m_pFactory;   // 8  (32-bit: 8, 64-bit: 16)
+    asIScriptEngine* scriptEngine; // 12 (32-bit: 12, 64-bit: 24)
+    void*            m_pDebugger;  // 16 (32-bit: 16, 64-bit: 32)
+    void*            m_pMapModule; // 20 (32-bit: 20, 64-bit: 40)
+    CASModule*       curModule;    // 24 (32-bit: 24, 64-bit: 48)
 };
 
 class CString;
@@ -300,9 +309,21 @@ typedef CASServerManager* (*fnASEXT_GetServerManager)();
 
 extern fnASEXT_GetServerManager ASEXT_GetServerManager;
 
+typedef asIScriptEngine* (*fnASEXT_GetScriptEngine)();
+
+extern fnASEXT_GetScriptEngine ASEXT_GetScriptEngine;
+
+typedef CASModule* (*fnASEXT_GetCurrentModule)();
+
+extern fnASEXT_GetCurrentModule ASEXT_GetCurrentModule;
+
 typedef CASFunction* (*fnASEXT_CreateCASFunction)(aslScriptFunction* aslfn, CASModule* asmodule, int unk);
 
 extern fnASEXT_CreateCASFunction ASEXT_CreateCASFunction;
+
+typedef void (*fnASEXT_ReleaseCASFunction)(CASFunction* callback);
+
+extern fnASEXT_ReleaseCASFunction ASEXT_ReleaseCASFunction;
 
 typedef bool (*fnASEXT_CASRefCountedBaseClass_InternalRelease)(void* ref);
 
@@ -386,7 +407,7 @@ extern fnASEXT_GetCurrentContext ASEXT_GetCurrentContext;
 typedef void (*fnASEXT_CScriptBuilder_DefineWord)(CScriptBuilder* pthis, const char* word);
 extern fnASEXT_CScriptBuilder_DefineWord ASEXT_CScriptBuilder_DefineWord;
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_WIN64)
 
 #    define SC_SERVER_DECL                  __fastcall
 #    define SC_SERVER_DUMMYARG_NOCOMMA      , int dummy
@@ -411,7 +432,7 @@ class CString
 public:
     const char* c_str() const
     {
-        return m_ptr;
+        return m_ptr ? m_ptr : "";
     }
     size_t length() const
     {
@@ -438,15 +459,11 @@ public:
         ASEXT_CStringdtor(this);
     }
 
-    int    unk1;       //0
-    int    unk2;       //4
-    int    unk3;       //8
-    int    unk4;       //12
-    int    unk5;       //16
-    char*  m_ptr;      //20
-    size_t m_len;      //24
-    size_t m_capacity; //28
-    int    unk7;       //32
+    char         m_buf[20];     // 0  (32-bit: 0..19, 64-bit: 0..19 + 4B pad)
+    char*        m_ptr;         // 20 (32-bit), 24 (64-bit)
+    unsigned int m_len;         // 24 (32-bit), 32 (64-bit)
+    unsigned int m_capacity;    // 28 (32-bit), 36 (64-bit)
+    unsigned int m_tokenizeIdx; // 32 (32-bit), 40 (64-bit)
 };
 
 class CASBLOB
@@ -466,12 +483,12 @@ public:
         return m_size == 0;
     }
 
-    int    unk1;           //0
-    void*  m_buf;          //4
-    size_t m_size;         //8
-    int    m_read_offset;  //12
-    int    m_write_offset; //16
-    char   m_can_resize;   //20
+    int          unk1;           // 0  (m_iRefCount; 4B pad on 64-bit)
+    void*        m_buf;          // 4  (32-bit), 8  (64-bit)
+    unsigned int m_size;         // 8  (32-bit), 16 (64-bit)
+    unsigned int m_read_offset;  // 12 (32-bit), 20 (64-bit)
+    unsigned int m_write_offset; // 16 (32-bit), 24 (64-bit)
+    char         m_can_resize;   // 20 (32-bit), 28 (64-bit)
 };
 
 class CScriptArrayBuffer
@@ -485,9 +502,9 @@ public:
     {
         return m_size;
     }
-    int  m_unk1;   //0
-    int  m_size;   //4
-    char m_buf[1]; //+8
+    unsigned int m_unk1;   // 0 (maxElements)
+    unsigned int m_size;   // 4 (numElements)
+    char         m_buf[1]; // 8
 };
 
 class CScriptArray
@@ -503,13 +520,13 @@ public:
         return m_buffer->m_size;
     }
 
-    int                 m_unk1;          //0
-    int                 m_unk2;          //4
-    int                 m_unk3;          //8
-    int                 m_unk4;          //12
-    CScriptArrayBuffer* m_buffer;        //16
-    int                 m_unk5;          //20
-    int                 m_ElementTypeId; //24
+    void*               m_vptr;          // 0  (32-bit), 0  (64-bit)
+    int                 m_refCount;      // 4  (32-bit), 8  (64-bit)
+    bool                m_gcFlag;        // 8  (32-bit), 12 (64-bit)
+    asITypeInfo*        m_objType;       // 12 (32-bit), 16 (64-bit)
+    CScriptArrayBuffer* m_buffer;        // 16 (32-bit), 24 (64-bit)
+    int                 m_elementSize;   // 20 (32-bit), 32 (64-bit)
+    int                 m_ElementTypeId; // 24 (32-bit), 36 (64-bit)
 };
 
 class CScriptDictionary
@@ -548,7 +565,10 @@ public:
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_CStringAssign);                           \
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_CStringdtor);                             \
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_GetServerManager);                        \
+    IMPORT_FUNCTION_DLSYM(asext, ASEXT_GetScriptEngine);                         \
+    IMPORT_FUNCTION_DLSYM(asext, ASEXT_GetCurrentModule);                        \
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_CreateCASFunction);                       \
+    IMPORT_FUNCTION_DLSYM(asext, ASEXT_ReleaseCASFunction);                      \
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_CASRefCountedBaseClass_InternalRelease);  \
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_CScriptAny_Release);                      \
     IMPORT_FUNCTION_DLSYM(asext, ASEXT_CScriptArray_Release);                    \
@@ -595,7 +615,10 @@ public:
     IMPORT_FUNCTION_DEFINE(ASEXT_CStringAssign);                           \
     IMPORT_FUNCTION_DEFINE(ASEXT_CStringdtor);                             \
     IMPORT_FUNCTION_DEFINE(ASEXT_GetServerManager);                        \
+    IMPORT_FUNCTION_DEFINE(ASEXT_GetScriptEngine);                         \
+    IMPORT_FUNCTION_DEFINE(ASEXT_GetCurrentModule);                        \
     IMPORT_FUNCTION_DEFINE(ASEXT_CreateCASFunction);                       \
+    IMPORT_FUNCTION_DEFINE(ASEXT_ReleaseCASFunction);                      \
     IMPORT_FUNCTION_DEFINE(ASEXT_CASRefCountedBaseClass_InternalRelease);  \
     IMPORT_FUNCTION_DEFINE(ASEXT_CScriptAny_Release);                      \
     IMPORT_FUNCTION_DEFINE(ASEXT_CScriptArray_Release);                    \

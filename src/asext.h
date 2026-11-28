@@ -92,6 +92,10 @@ C_DLLEXPORT void ASEXT_RegisterGlobalProperty(CASDocumentation* pASDoc, const ch
 */
 C_DLLEXPORT void ASEXT_RegisterFuncDef(CASDocumentation* pASDoc, const char* docs, const char* funcdef);
 
+C_DLLEXPORT void ASEXT_RegisterEnum(CASDocumentation* pASDoc, const char* docs, const char* enums, int enumtype);
+
+C_DLLEXPORT void ASEXT_RegisterEnumValue(CASDocumentation* pASDoc, const char* docs, const char* enums, const char* name, int value);
+
 /* Create directory in the virtual file system */
 C_DLLEXPORT void ASEXT_CreateDirectory(CASDirectoryList* pASDirList, const char* path, unsigned char flags, unsigned char access_control, unsigned char permanent, unsigned char unk);
 
@@ -151,6 +155,12 @@ typedef int (*fnASEXT_CallCASBaseCallable)(void* callable, int dummy, ...);
 C_DLLEXPORT fnASEXT_CallCASBaseCallable ASEXT_CallCASBaseCallable;
 
 C_DLLEXPORT CASServerManager* ASEXT_GetServerManager();
+
+C_DLLEXPORT asIScriptEngine* ASEXT_GetScriptEngine();
+
+C_DLLEXPORT CASModule* ASEXT_GetCurrentModule();
+
+C_DLLEXPORT void ASEXT_ReleaseCASFunction(CASFunction* callback);
 
 C_DLLEXPORT bool ASEXT_CASRefCountedBaseClass_InternalRelease(void* ref);
 
